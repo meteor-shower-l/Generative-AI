@@ -111,6 +111,9 @@ for times in range(epoch):
         )
         false_labels = torch.zeros(sample_num, 1, device=device)
         outputs_of_G = G(false_features)
+        # detach用于截断梯度
+        # 但是得益于zero_grad的使用，即使不使用detach也不会有什么原理性错误，只会导致计算量增加
+        # 可以对比一下G的训练过程，彼处不可以截断，也不可避免的计算了D的梯度，但是由于使用了zero_grad，因此也不会带来影响
         Judge_of_D = D(outputs_of_G.detach())
 
         false_loss = loss_function(Judge_of_D, false_labels)
