@@ -1,6 +1,8 @@
 # Conditional GAN 条件GAN
 
 
+from pathlib import Path
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -33,9 +35,13 @@ def save_result_to_image(result, filename="generated_images.png"):
 # 学习率
 lr = 1e-4
 # 训练轮数
-train_epoch = 50
+train_epoch = 100
 # 设备
 device = "cuda" if torch.cuda.is_available() else "cpu"
+# 定义图片保存路径
+current_file = Path(__file__).resolve()
+current_file = current_file.parent
+img_dir = current_file / "CGAN_img"
 
 
 # 定义D(判别器)
@@ -171,4 +177,4 @@ for times in range(train_epoch):
     )
     if (times + 1) % 10 == 0:
         result = G(fixed_false_features, standard_label)
-        save_result_to_image(result, f"generated_epoch_{times + 1}.png")
+        save_result_to_image(result, str(img_dir / f"generated_epoch_{times + 1}.png"))
