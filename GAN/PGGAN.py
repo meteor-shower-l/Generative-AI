@@ -193,3 +193,36 @@ class D(nn.Module):
         out = self.final_block(out)
         out = out.view(out.size(0), -1)
         return self.final_linear(out)
+
+
+# 为了梯度惩罚,即让梯度不超过1,实践中，可以在损失函数中添加一个梯度与1之差的平方
+# 下面的函数基于autograd实现了求该惩罚项
+def gradient_penalty(
+    discriminator: nn.Module,
+    real_picture: torch.Tensor,
+    fake_picture: torch.Tensor,
+    step: int,
+    alpha: float,
+):
+    batch_size_local = real_picture.size(0)
+    # 得到真假点连线上的一个点
+    # epsilon可以理解为一个随机值
+    epsilon = torch.rand(batch_size_local, 1, 1, 1, device=real_picture.device)
+    interpolated = epsilon * real_picture + (1 - epsilon) * fake_picture
+    interpolated.requires_grad_(True)
+
+    mixed_scores = discriminator(interpolated, step, alpha)
+    grad_outputs = torch.ones_like(mixed_scores)
+    # 进行求导
+    gradients = autograd.grad(
+        outputs=mixed_scores,  # 求导的输出
+        inputs=interpolated,  # 求导的输入
+        # 即求inputs对outputs的导数
+        grad_outputs=grad_outputs,  # 对每个输出样本都要进行操作
+        create_graph=True,
+        retain_graph=True,  # 保留计算图，方便后续使用(不一定必须)
+        only_inputs=True,  # 只关心inputs的梯度
+    )[0]
+
+    gradients = gradients.view(batch_size_local, -1)
+    return ((gradients.norm(2, dim=1) - 1) ** 2).mean()
