@@ -7,16 +7,21 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 
 # 定义超参数
-device = torch.device("cuda")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 lr = 1e-4
 latent_size = 256
 out_res = 128
-batch_size = 16 if device.type == "cuda" else 4
+batch_size = 16
+sample_count = 16  # 每次测试时生成器生成图片数量
+epoch_per_stage = 1  # 每个分辨率下的训练轮次
+d_steps_per_g_step = 1
 
 current_file = Path(__file__).resolve()
 project_root = current_file.parents[3]
 dataset_root = project_root / "dataset"
-output_dir = current_file.parent / "PGGAN_output"
+output_dir = current_file.parent / "PGGAN_img"
+output_dir.mkdir(parents=True, exist_ok=True)
+resolutions = [4, 8, 16, 32, 64, 128]
 channels = {
     4: 512,
     8: 512,
@@ -38,7 +43,7 @@ dataset = datasets.CelebA(
     root=str(dataset_root),
     split="all",
     transform=transform,
-    download=True,
+    download=False,
 )
 dataloader = DataLoader(
     dataset,
@@ -61,12 +66,19 @@ class PixelNorm(nn.Module):
 
 
 # 定义一个可以支持上下采样以及完成channel维度初始化的卷积层类
+
+
 class Conv(nn.Module):
     def __init__(
-        self, in_channels, out_channels, PixelNorm=True, upsample=True, downsample=True
+        self,
+        in_channels,
+        out_channels,
+        use_PixelNorm=True,
+        upsample=False,
+        downsample=False,
     ):
         super().__init__()
-        self.PixelNorm = PixelNorm
+        self.use_PixelNorm = use_PixelNorm
         self.upsample = upsample
         self.downsample = downsample
 
@@ -88,10 +100,10 @@ class Conv(nn.Module):
         if self.upsample:
             x = nn.functional.interpolate(x, scale_factor=2, mode="nearest")
         x = self.activate_function(self.conv1(x))
-        if self.use_pixelnorm:
+        if self.use_PixelNorm:
             x = self.pixelnorm(x)
-        x = self.activation(self.conv2(x))
-        if self.use_pixelnorm:
+        x = self.activate_function(self.conv2(x))
+        if self.use_PixelNorm:
             x = self.pixelnorm(x)
         if self.downsample:
             x = self.pool(x)  # type: ignore
@@ -99,18 +111,17 @@ class Conv(nn.Module):
 
 
 class G(nn.Module):
-    def __init__(self, latent_size):
+    def __init__(self, latent_size=latent_size):
         super().__init__()
         self.init_linear = nn.Linear(latent_size, channels[4] * 4 * 4)
-        self.init_conv = Conv(channels[4], channels[4], PixelNorm=True)
+        self.init_conv = Conv(channels[4], channels[4], use_PixelNorm=True)
         self.prog_blocks = nn.ModuleList(
             [
-                Conv(channels[4], channels[8], PixelNorm=True, upsample=True),
-                Conv(channels[8], channels[16], PixelNorm=True, upsample=True),
-                Conv(channels[16], channels[32], PixelNorm=True, upsample=True),
-                Conv(channels[32], channels[64], PixelNorm=True, upsample=True),
-                Conv(channels[32], channels[64], PixelNorm=True, upsample=True),
-                Conv(channels[64], channels[128], PixelNorm=True, upsample=True),
+                Conv(channels[4], channels[8], use_PixelNorm=True, upsample=True),
+                Conv(channels[8], channels[16], use_PixelNorm=True, upsample=True),
+                Conv(channels[16], channels[32], use_PixelNorm=True, upsample=True),
+                Conv(channels[32], channels[64], use_PixelNorm=True, upsample=True),
+                Conv(channels[64], channels[128], use_PixelNorm=True, upsample=True),
             ]
         )
         self.rgb_blocks = nn.ModuleList(
@@ -130,7 +141,7 @@ class G(nn.Module):
         out = self.init_conv(out)
 
         if step == 0:
-            return torch.tanh(self.to_rgbs[0](out))
+            return torch.tanh(self.rgb_blocks[0](out))
 
         for current_step in range(1, step):
             out = self.prog_blocks[current_step - 1](out)
@@ -151,14 +162,14 @@ class D(nn.Module):
         super().__init__()
         self.prog_blocks = nn.ModuleList(
             [
-                Conv(channels[8], channels[4], PixelNorm=False, downsample=True),
-                Conv(channels[16], channels[8], PixelNorm=False, downsample=True),
-                Conv(channels[32], channels[16], PixelNorm=False, downsample=True),
-                Conv(channels[64], channels[32], PixelNorm=False, downsample=True),
-                Conv(channels[128], channels[64], PixelNorm=False, downsample=True),
+                Conv(channels[8], channels[4], use_PixelNorm=False, downsample=True),
+                Conv(channels[16], channels[8], use_PixelNorm=False, downsample=True),
+                Conv(channels[32], channels[16], use_PixelNorm=False, downsample=True),
+                Conv(channels[64], channels[32], use_PixelNorm=False, downsample=True),
+                Conv(channels[128], channels[64], use_PixelNorm=False, downsample=True),
             ]
         )
-        self.rbg_blocks = nn.ModuleList(
+        self.rgb_blocks = nn.ModuleList(
             [
                 nn.Conv2d(3, channels[4], kernel_size=1),
                 nn.Conv2d(3, channels[8], kernel_size=1),
@@ -168,30 +179,29 @@ class D(nn.Module):
                 nn.Conv2d(3, channels[128], kernel_size=1),
             ]
         )
-        self.final_block = Conv(channels[4], channels[4], PixelNorm=False)
+        self.final_block = Conv(channels[4], channels[4], use_PixelNorm=False)
         self.final_linear = nn.Linear(channels[4] * 4 * 4, 1)
 
     def forward(self, x: torch.Tensor, step: int, alpha: float):
         if step == 0:
-            out = self.from_rgbs[0](x)
+            out = self.rgb_blocks[0](x)
             out = self.final_block(out)
-            out = out.view(out.size(0), -1)
+            out = out.view(out.shape[0], -1)
             return self.final_linear(out)
 
-        current_feature_map = self.rbg_blocks[step](x)
+        current_feature_map = self.rgb_blocks[step](x)
         current_feature_map = self.prog_blocks[step - 1](current_feature_map)
 
-        previous_featue_map = nn.functional.avg_pool2d(x, kernel_size=2)
-        previous_featue_map = self.rbg_blocks[step - 1](previous_featue_map)
+        previous_feature_map = nn.functional.avg_pool2d(x, kernel_size=2)
+        previous_feature_map = self.rgb_blocks[step - 1](previous_feature_map)
 
-        out = alpha * current_feature_map + (1 - alpha) * previous_featue_map
+        out = alpha * current_feature_map + (1 - alpha) * previous_feature_map
 
         for current_step in range(step - 2, -1, -1):
             out = self.prog_blocks[current_step](out)
 
-        out = self.rbg_blocks[0](out)
         out = self.final_block(out)
-        out = out.view(out.size(0), -1)
+        out = out.view(out.shape[0], -1)
         return self.final_linear(out)
 
 
@@ -226,3 +236,87 @@ def gradient_penalty(
 
     gradients = gradients.view(batch_size_local, -1)
     return ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+
+
+# 用于令生成器生成指定数量的图片并保存
+def save_samples(
+    generator: nn.Module, step: int, alpha: float, filename, count=sample_count
+):
+    generator.eval()
+    with torch.no_grad():
+        z = torch.randn(count, latent_size, device=device)
+        samples = generator(z, step, alpha)
+        samples = (samples + 1) / 2
+        save_image(samples, str(filename), nrow=4)
+    generator.train()
+
+
+generator = G().to(device)
+discriminator = D().to(device)
+g_optimizer = torch.optim.Adam(generator.parameters(), lr=lr)
+d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=lr)
+step = 0
+for resolution in resolutions:
+    print(f"开始训练{resolution}*{resolution}像素的层级")
+    for train_times in range(epoch_per_stage):
+        print(f"开始训练{train_times + 1}/{epoch_per_stage}轮")
+        batch_index = 0
+        for real_img, _ in dataloader:
+            real_img = real_img.to(device)
+            # 将真实图像进行下采样至指定清晰度
+            real_img = nn.functional.interpolate(
+                real_img,
+                size=(resolution, resolution),
+                mode="bilinear",
+                align_corners=False,
+            )
+            alpha = min(1.0, batch_index / max(1, (len(dataloader) - 1)))
+            total_d_loss = 0
+            # 训练d_steps_per_g_step次判别器
+            for _ in range(d_steps_per_g_step):
+                noise = torch.randn(real_img.shape[0], latent_size, device=device)
+                # 由生成器生成伪造图像
+                fake_img = generator(
+                    noise, step, alpha
+                ).detach()  # 截断梯度,确保不训练生成器
+                # 得到判别器对真假的图像的判断,在此时传入step与alpha
+                real_score = discriminator(real_img, step, alpha)
+                fake_score = discriminator(fake_img, step, alpha)
+                # 计算梯度惩罚,以限制判别器的梯度
+                gradient_p = gradient_penalty(
+                    discriminator=discriminator,
+                    real_picture=real_img,
+                    fake_picture=fake_img,
+                    step=step,
+                    alpha=alpha,
+                )
+                # 计算损失函数
+                d_loss = fake_score.mean() - real_score.mean() + gradient_p * 10
+                total_d_loss += d_loss.item()
+                # 反向传播并优化
+                d_optimizer.zero_grad()
+                d_loss.backward()
+                d_optimizer.step()
+            # 训练1次生成器
+            noise = torch.randn(real_img.shape[0], latent_size, device=device)
+            fake_img = generator(noise, step, alpha)
+            g_loss = -discriminator(fake_img, step, alpha).mean()
+            g_optimizer.zero_grad()
+            g_loss.backward()
+            g_optimizer.step()
+
+            # 完成一个批次的训练,输出训练信息
+            average_d_loss = total_d_loss / d_steps_per_g_step
+            print(
+                f"batch {batch_index}/{len(dataloader)}"
+                f"D_loss={average_d_loss:.4f} G_loss={g_loss.item():.4f}"
+            )
+
+            # 更新batch_index
+            batch_index += 1
+
+    # 每完成一个精确度的训练，生成并保存组图像
+    sample_path = output_dir / f"sample_{resolution}x{resolution}.png"
+    save_samples(generator, step, 1.0, sample_path)
+    # 更新步数
+    step += 1
