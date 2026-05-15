@@ -1,9 +1,10 @@
 from pathlib import Path
 
 import torch
+from PIL import Image
 from torch import autograd, nn
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
+from torch.utils.data import DataLoader, Dataset
+from torchvision import transforms
 from torchvision.utils import save_image
 
 # 定义超参数
@@ -11,14 +12,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 lr = 1e-4
 latent_size = 256
 out_res = 128
-batch_size = 16
+batch_size = 64
 sample_count = 16  # 每次测试时生成器生成图片数量
 epoch_per_stage = 1  # 每个分辨率下的训练轮次
 d_steps_per_g_step = 1
 
 current_file = Path(__file__).resolve()
 project_root = current_file.parents[3]
-dataset_root = project_root / "dataset"
+dataset_dir = project_root / "dataset" / "celeba" / "img_align_celeba"
 output_dir = current_file.parent / "PGGAN_img"
 output_dir.mkdir(parents=True, exist_ok=True)
 resolutions = [4, 8, 16, 32, 64, 128]
@@ -30,6 +31,32 @@ channels = {
     64: 64,
     128: 32,
 }
+
+
+class CelebAImageDataset(Dataset):
+    def __init__(self, root: Path, transform=None):
+        self.root = Path(root)
+        self.transform = transform
+        self.image_paths = sorted(
+            [
+                path
+                for path in self.root.iterdir()
+                if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp"}
+            ]
+        )
+        if not self.image_paths:
+            raise RuntimeError(f"No images found in {self.root}")
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, index):
+        image = Image.open(self.image_paths[index]).convert("RGB")
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, 0
+
+
 # 准备数据
 transform = transforms.Compose(
     [
@@ -39,12 +66,7 @@ transform = transforms.Compose(
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
     ]
 )
-dataset = datasets.CelebA(
-    root=str(dataset_root),
-    split="all",
-    transform=transform,
-    download=False,
-)
+dataset = CelebAImageDataset(dataset_dir, transform=transform)
 dataloader = DataLoader(
     dataset,
     batch_size=batch_size,
