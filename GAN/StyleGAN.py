@@ -96,3 +96,39 @@ class StyleGANBlock(nn.Module):
         x = self.act(x)
         x = self.adain2(x, w2)
         return x
+
+
+class FirstBlock(nn.Module):
+    def __init__(self, style_dim: int, out_channel: int = 512):
+        super().__init__()
+        self.const = nn.Parameter(torch.randn(1, out_channel, 4, 4))
+        self.conv1 = nn.Conv2d(out_channel, out_channel, kernel_size=3, padding=1)
+        nn.init.kaiming_normal_(
+            self.conv1.weight, a=0.2, mode="fan_in", nonlinearity="leaky_relu"
+        )
+        self.noise1 = NoiseInjection(out_channel)
+        self.adain1 = AdaIN(style_dim, out_channel)
+        self.act = nn.LeakyReLU(0.2)
+        self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size=3, padding=1)
+        nn.init.kaiming_normal_(
+            self.conv2.weight, a=0.2, mode="fan_in", nonlinearity="leaky_relu"
+        )
+        self.noise2 = NoiseInjection(out_channel)
+        self.adain2 = AdaIN(style_dim, out_channel)
+
+    def forward(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+    ):
+        batch_size = w1.shape[0]
+        x = self.const.repeat(batch_size, 1, 1, 1)
+        x = self.conv1(x)
+        x = self.noise1(x)
+        x = self.act(x)
+        x = self.adain1(x, w1)
+        x = self.conv2(x)
+        x = self.noise2(x)
+        x = self.act(x)
+        x = self.adain2(x, w2)
+        return x
