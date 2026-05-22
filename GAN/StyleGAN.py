@@ -83,18 +83,17 @@ class StyleGANBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
+        w: torch.Tensor,
     ):
         x = self.upsample(x)
         x = self.conv1(x)
         x = self.noise1(x)
         x = self.act(x)
-        x = self.adain1(x, w1)
+        x = self.adain1(x, w)
         x = self.conv2(x)
         x = self.noise2(x)
         x = self.act(x)
-        x = self.adain2(x, w2)
+        x = self.adain2(x, w)
         return x
 
 
@@ -118,17 +117,90 @@ class FirstBlock(nn.Module):
 
     def forward(
         self,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
+        w: torch.Tensor,
     ):
-        batch_size = w1.shape[0]
+        batch_size = w.shape[0]
         x = self.const.repeat(batch_size, 1, 1, 1)
         x = self.conv1(x)
         x = self.noise1(x)
         x = self.act(x)
-        x = self.adain1(x, w1)
+        x = self.adain1(x, w)
         x = self.conv2(x)
         x = self.noise2(x)
         x = self.act(x)
-        x = self.adain2(x, w2)
+        x = self.adain2(x, w)
         return x
+
+
+class G(nn.Module):
+    def __init__(
+        self,
+        style_dim: int = 512,
+        init_channels: int = 512,
+        target_resolution: int = 256,
+        mapping_layer_num: int = 8,
+    ):
+        super().__init__()
+        self.style_dim = style_dim
+        self.maping_net = Mapping_net(style_dim, mapping_layer_num)
+        self.FirstBlock = FirstBlock(style_dim=style_dim, out_channel=init_channels)
+        self.Blocks = nn.ModuleList()
+        self.to_rgb = nn.ModuleList()
+        self.style_dim = style_dim
+        current_resolution = 4
+        self.to_rgb.append(
+            nn.Conv2d(
+                in_channels=init_channels,
+                out_channels=3,
+                kernel_size=1,
+            )
+        )
+        while current_resolution < target_resolution:
+            in_channel = max((init_channels * 4 // current_resolution), 16)
+            out_channel = max((init_channels * 2 // current_resolution), 16)
+            self.Blocks.append(
+                StyleGANBlock(
+                    in_channel=in_channel,
+                    out_channel=out_channel,
+                    style_dim=style_dim,
+                )
+            )
+            self.to_rgb.append(
+                nn.Conv2d(
+                    in_channels=out_channel,
+                    out_channels=3,
+                    kernel_size=1,
+                )
+            )
+            current_resolution *= 2
+
+    def forward(
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor,
+        step: int,
+        alpha: float,
+    ):
+        w1 = self.maping_net(z1)
+        w2 = self.maping_net(z2)
+        total_layers = step + 1
+        cutoff = total_layers // 2
+
+        def select_w(layer_idx: int):
+            return w1 if layer_idx < cutoff else w2
+
+        x = self.FirstBlock(select_w(0))
+        if step == 0:
+            return self.to_rgb[0](x)
+
+        for i in range(1, step):
+            x = self.Blocks[i - 1](x, select_w(i))
+
+        previous_img = self.to_rgb[step - 1](x)
+        previous_img = nn.functional.interpolate(
+            previous_img, scale_factor=2, mode="nearest"
+        )
+        x = self.Blocks[step - 1](x, select_w(step))
+        current_img = self.to_rgb[step](x)
+        final_img = alpha * current_img + (1.0 - alpha) * previous_img
+        return final_img
